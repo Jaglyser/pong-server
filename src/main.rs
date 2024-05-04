@@ -1,44 +1,61 @@
-use std::{net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket}, thread, time::{Duration, Instant}};
+use std::{net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket}, num::ParseIntError, slice::Iter, thread, time::{Duration, Instant}};
 
 struct World {
-    players: Vec<Renderable>,
-    last_updated: Vec<Speed>
+    render_components: Vec<Renderable>,
+    speed_components: Vec<Speed>,
+    subscriber_components: Vec<Subscriber>,
 }
 
 impl World {
     fn new() -> Self {
         World {
-            players: Vec::new(),
-            last_updated: Vec::new() 
+            render_components: Vec::new(),
+            speed_components: Vec::new(),
+            subscriber_components: Vec::new() 
         }
+    }
+    fn create_ball(&mut self) -> &Renderable {
+        let ball = Renderable { x: 400, y: 300, width: 20, height: 20, source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1) };
+        let velocity = Speed { dx: 1, dy: 1, last_update: Instant::now(), source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1) };
+        self.render_components.push(ball);
+        self.speed_components.push(velocity);
+
+        return self.render_components.last().unwrap();
     }
 
     fn create_player(&mut self, source: SocketAddr) -> &Renderable {
-        let player = if self.players.len() == 0 {
+        let player = if self.render_components.len() == 0 {
             Renderable { x: 20, y: 100, width: 20, height: 100, source }
         } else {
             Renderable { x: 760, y: 100, width: 20, height: 100, source }
         };
         let speed = Speed { dx: 0, dy: 0, last_update: Instant::now(), source };
-        self.players.push(player);
-        self.last_updated.push(speed);
+        let subscriber = Subscriber { address: source };
+        self.render_components.push(player);
+        self.speed_components.push(speed);
+        self.subscriber_components.push(subscriber);
 
-        return self.players.last().unwrap();
+        return self.render_components.last().unwrap();
     }
 
     fn get_last_updated(&self, renderable: &Renderable) -> Instant {
-        self.last_updated.iter()
+        self.speed_components.iter()
             .find(|speed| speed.source == renderable.source)
             .map(|speed| speed.last_update)
             .unwrap()
     }
 
     fn update_time(&mut self, renderable: &Renderable) {
-        self.last_updated.iter_mut()
+        self.speed_components.iter_mut()
             .find(|speed| speed.source == renderable.source)
             .map(|speed| speed.last_update = Instant::now());
     }
 }
+
+struct Subscriber {
+    address: SocketAddr,
+}
+
 
 struct Renderable {
     x: i32,
@@ -46,6 +63,11 @@ struct Renderable {
     width: i32,
     height: i32,
     source: SocketAddr
+}
+
+struct Position {
+    x: i32,
+    y: i32,
 }
 
 struct Speed {
@@ -59,18 +81,17 @@ impl ToString for Renderable  {
     fn to_string(&self) -> String {
         format!("{} {} {} {}", self.x, self.y, self.width, self.height)
     }
-    
 }
 
-struct BallSystem {
+struct CollisionSystem {
     ball: Renderable,
     velocity: Speed,
 }
 
 
-impl BallSystem {
+impl CollisionSystem {
     fn new() -> Self {
-        BallSystem {
+        CollisionSystem {
             ball: Renderable { x: 400, y: 300, width: 20, height: 20, source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0) },
             velocity: Speed { dx: 1, dy: 1, last_update: Instant::now(), source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0) }
         }
@@ -80,7 +101,15 @@ impl BallSystem {
         self.ball.x += self.velocity.dx;
     }
 
+    fn detect_collision(&mut self, render_components: &mut Iter<Renderable>) {
+        if render_components.len() >= 2 {
+            render_components.find(|player| self.player_collision(player))
+                .map(|_| self.bounce());
+        }
+    }
+
     fn player_collision(&self, player: &Renderable) -> bool {
+        player.height != player.width &&
         self.ball.x < player.x + player.width &&
             self.ball.x + self.ball.width > player.x &&
             self.ball.y < player.y + player.height &&
@@ -99,9 +128,14 @@ impl BallSystem {
         self.velocity.dx = -1*self.velocity.dx;
     }
 
-    fn new_ball (&mut self) {
-        self.ball.x = 400;
-        self.ball.y = 300;
+    fn new_ball (&mut self, render_components: &mut Iter<Renderable>) {
+        render_components.find(|renderable| renderable.height == renderable.width)
+            .map(|player| {
+                self.ball.x = 400;
+                self.ball.y = 300;
+                self.velocity.dx = 1;
+                self.velocity.dy = 1;
+            });
     }
 
 }
@@ -131,10 +165,46 @@ impl NetworkSystem {
         self.socket.recv_from(&mut self.buf)
     }
 
+
     fn parse_request(&self, size: usize) -> &str {
         std::str::from_utf8(&self.buf[..size]).unwrap()
     }
+
+    fn handle_join(&self, request: &str, source: SocketAddr, world: &mut World) -> Result<(), std::io::Error> {
+        if world.render_components.len() < 3 {
+            let player = world.create_player(source);
+            let response = format!("{} {} {} {}", player.x, player.y, player.width, player.height);
+            self.socket.send_to(response.as_bytes(), source).expect("Failed to send response");
+            println!("Player joined! Total players: {}", world.render_components.len());
+            Ok(())
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "Game is full"))
+        }
+    }
+
+    fn parse_player(&self, request: &str) -> Result<(i32, i32, i32, i32), ParseIntError> {
+        let parts: Vec<&str> = request.split_whitespace().collect();
+        let x = parts[0].parse::<i32>()?;
+        let y = parts[1].parse::<i32>()?;
+        let width = parts[2].parse::<i32>()?;
+        let height = parts[3].parse::<i32>()?;
+        let pos = Position { x, y };
+        Ok((x, y, width, height))
+    }
+
+    fn send_state(&self, world: &World) {
+        let state =  world.render_components.iter()
+            .map(|renderable| renderable.to_string())
+            .collect::<Vec<String>>()
+            .join("");
+
+        world.render_components.iter()
+            .for_each(|renderable| {
+                self.socket.send_to(state.as_bytes(), renderable.source).expect("Failed to send response");
+            });
+    }
 }
+
 
 struct ControlSystem;
 
@@ -143,13 +213,30 @@ impl ControlSystem {
         ControlSystem
     }
 
-
+    fn update(&self, x: i32, y:i32, source: SocketAddr, world: &mut World) {
+        world.render_components.iter_mut()
+            .find(|player| player.source == source)
+            .map(|player| {
+                player.x = x;
+                player.y = y;
+            });
+        if world.render_components.len() >= 2 {
+            world.render_components.iter_mut()
+                .zip(world.speed_components.iter())
+                .find(|(renderable, speed)| renderable.height == renderable.width && renderable.source == speed.source)
+                .map(|(renderable, speed)| {
+                    renderable.x += speed.dx;
+                    renderable.y += speed.dy;
+                });
+        }
+    }
 }
+
 
 fn main() {
     let mut world = World::new();
     let mut network_system = NetworkSystem::new();
-    let mut ball_system = BallSystem::new();
+    let mut collision_system = CollisionSystem::new();
     let mut control_system = ControlSystem::new();
 
     loop {
@@ -157,54 +244,28 @@ fn main() {
             Ok((size, source)) => (size, source),
             Err(_) => continue,
         };
-            
-        let request = network_system.parse_request(size);
-        //println!("Received request: {} from {}", request, source);
+        let request = &network_system.parse_request(size);
 
-        if request == "join" && world.players.len() < 3 {
-            let player = world.create_player(source);
-            let response = format!("{} {} {} {}", player.x, player.y, player.width, player.height);
-            network_system.socket.send_to(response.as_bytes(), source).expect("Failed to send response");
-
-            println!("Player joined! Total players: {}", world.players.len());
-            //world.players.push(player);
-        } else {
-
-
-            let renderable = world.players.iter_mut()
-                .find(|player| player.source == source)
-                .map(|player| {
-                    let parts: Vec<&str> = request.split_whitespace().collect();
-
-                    let y = parts[1].parse::<i32>().unwrap();
-
-                    player.y = y;
-                    player.width = parts[2].parse().unwrap();
-                    player.height = parts[3].parse().unwrap();
-                });
-
-            let player_state =  world.players.iter()
-                .filter(|player| player.source != source)
-                .filter(|player| player.width != player.height)
-                .map(|player| player.to_string())
-                .collect::<Vec<String>>()
-                .join("");
-
-
-            let ball_state =  ball_system.ball.to_string();
-
-            let state = [player_state, ball_state].join(" ");
-
-            network_system.socket.send_to(state.as_bytes(), source).expect("Failed to send response");
+        match network_system.handle_join(request, source, &mut world) {
+            Ok(()) => continue,
+            Err(_) => {
+                network_system.socket.send_to("Game is full".as_bytes(), source).expect("Failed to send response");
+            },
         }
-        if world.players.len() == 2 {
-            ball_system.update();
-            world.players.iter().find(|player| ball_system.player_collision(player))
-                .map(|_| ball_system.bounce());
 
-            ball_system.goal().then(|| ball_system.new_ball());
-        }
+        world.create_ball();
+
+        let (x, y, width, height) =  match network_system.parse_player(request) {
+            Ok((x, y, width, height)) => (x, y, width, height),
+            Err(_) => {
+                continue;
+            }
+        };
+
+        control_system.update(x, y, source, &mut world);
+        collision_system.detect_collision(&mut world.render_components.iter());
+        collision_system.goal().then(|| collision_system.new_ball(&mut world.render_components.iter()));
+        network_system.send_state(&world);
     }
 }
-
 
