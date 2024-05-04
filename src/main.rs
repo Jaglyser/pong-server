@@ -1,9 +1,8 @@
-use std::{net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket}, num::ParseIntError, slice::Iter, thread, time::{Duration, Instant}};
+use std::{net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket}, num::ParseIntError, slice::Iter, time::Instant};
 
 struct World {
     render_components: Vec<Renderable>,
     speed_components: Vec<Speed>,
-    subscriber_components: Vec<Subscriber>,
 }
 
 impl World {
@@ -11,16 +10,15 @@ impl World {
         World {
             render_components: Vec::new(),
             speed_components: Vec::new(),
-            subscriber_components: Vec::new() 
         }
     }
-    fn create_ball(&mut self) -> &Renderable {
-        let ball = Renderable { x: 400, y: 300, width: 20, height: 20, source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1) };
-        let velocity = Speed { dx: 1, dy: 1, last_update: Instant::now(), source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1) };
-        self.render_components.push(ball);
-        self.speed_components.push(velocity);
-
-        return self.render_components.last().unwrap();
+    fn create_ball(&mut self) {
+        if self.render_components.len() == 2 {
+            let ball = Renderable { x: 400, y: 300, width: 20, height: 20, source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1) };
+            let velocity = Speed { dx: 1, dy: 1, last_update: Instant::now(), source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1) };
+            self.render_components.push(ball);
+            self.speed_components.push(velocity);
+        }
     }
 
     fn create_player(&mut self, source: SocketAddr) -> &Renderable {
@@ -30,32 +28,13 @@ impl World {
             Renderable { x: 760, y: 100, width: 20, height: 100, source }
         };
         let speed = Speed { dx: 0, dy: 0, last_update: Instant::now(), source };
-        let subscriber = Subscriber { address: source };
         self.render_components.push(player);
         self.speed_components.push(speed);
-        self.subscriber_components.push(subscriber);
 
         return self.render_components.last().unwrap();
     }
 
-    fn get_last_updated(&self, renderable: &Renderable) -> Instant {
-        self.speed_components.iter()
-            .find(|speed| speed.source == renderable.source)
-            .map(|speed| speed.last_update)
-            .unwrap()
-    }
-
-    fn update_time(&mut self, renderable: &Renderable) {
-        self.speed_components.iter_mut()
-            .find(|speed| speed.source == renderable.source)
-            .map(|speed| speed.last_update = Instant::now());
-    }
 }
-
-struct Subscriber {
-    address: SocketAddr,
-}
-
 
 struct Renderable {
     x: i32,
@@ -63,11 +42,6 @@ struct Renderable {
     width: i32,
     height: i32,
     source: SocketAddr
-}
-
-struct Position {
-    x: i32,
-    y: i32,
 }
 
 struct Speed {
@@ -171,7 +145,7 @@ impl NetworkSystem {
     }
 
     fn handle_join(&self, request: &str, source: SocketAddr, world: &mut World) -> Result<(), std::io::Error> {
-        if world.render_components.len() < 3 {
+        if request == "join" && world.render_components.len() < 3 {
             let player = world.create_player(source);
             let response = format!("{} {} {} {}", player.x, player.y, player.width, player.height);
             self.socket.send_to(response.as_bytes(), source).expect("Failed to send response");
@@ -188,7 +162,6 @@ impl NetworkSystem {
         let y = parts[1].parse::<i32>()?;
         let width = parts[2].parse::<i32>()?;
         let height = parts[3].parse::<i32>()?;
-        let pos = Position { x, y };
         Ok((x, y, width, height))
     }
 
@@ -197,8 +170,10 @@ impl NetworkSystem {
             .map(|renderable| renderable.to_string())
             .collect::<Vec<String>>()
             .join("");
+        println!("Sending state: {}", state);
 
         world.render_components.iter()
+            .filter(|renderable| renderable.height != renderable.width)
             .for_each(|renderable| {
                 self.socket.send_to(state.as_bytes(), renderable.source).expect("Failed to send response");
             });
@@ -237,9 +212,11 @@ fn main() {
     let mut world = World::new();
     let mut network_system = NetworkSystem::new();
     let mut collision_system = CollisionSystem::new();
-    let mut control_system = ControlSystem::new();
+    let control_system = ControlSystem::new();
 
     loop {
+        world.create_ball();
+
         let (size, source) = match network_system.receive() {
             Ok((size, source)) => (size, source),
             Err(_) => continue,
@@ -253,7 +230,6 @@ fn main() {
             },
         }
 
-        world.create_ball();
 
         let (x, y, width, height) =  match network_system.parse_player(request) {
             Ok((x, y, width, height)) => (x, y, width, height),
@@ -261,6 +237,7 @@ fn main() {
                 continue;
             }
         };
+
 
         control_system.update(x, y, source, &mut world);
         collision_system.detect_collision(&mut world.render_components.iter());
