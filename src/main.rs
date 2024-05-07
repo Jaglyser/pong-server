@@ -208,7 +208,7 @@ impl NetworkSystem {
                 let state = world
                     .render_components
                     .iter()
-                    .filter(|r| r.source != renderable.source)
+                    .filter(|r| r.source.to_string() != renderable.source.to_string())
                     .map(|r| r.to_string())
                     .collect::<Vec<String>>()
                     .join(" ");
