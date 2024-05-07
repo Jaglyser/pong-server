@@ -1,7 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     num::ParseFloatError,
-    time::Instant,
 };
 
 struct World {
@@ -93,27 +92,44 @@ impl CollisionSystem {
         CollisionSystem
     }
 
-    //fn detect_collision(&mut self, world: &mut World) {
-    //    let (ball, mut speed) = &world
-    //        .render_components
-    //        .iter_mut()
-    //        .zip(world.speed_components.iter_mut())
-    //        .find(|(renderable, speed)| renderable.height == renderable.width)
-    //        .unwrap();
+    fn collision(&mut self, world: &mut World) {
+        if world.render_components.len() < 3 {
+            return;
+        }
 
-    //    if world.render_components.len() >= 2 {
-    //        &world.render_components.iter_mut()
-    //            .find(|player| self.player_collision(player, ball))
-    //            .map(|_| self.bounce(speed));
-    //    }
-    //}
+        let (ball, speed) = world
+            .render_components
+            .iter()
+            .zip(world.speed_components.iter_mut())
+            .find(|(renderable, speed)| renderable.height == renderable.width 
+                  && renderable.source == speed.source)
+            .unwrap();
+
+
+        let _collision = world
+            .render_components
+            .iter()
+            .filter(|renderable| renderable.height != renderable.width)
+            .find(|player| self.player_collision(player, ball))
+            .map(|_| self.bounce(speed));
+    }
 
     fn player_collision(&self, player: &Renderable, ball: &Renderable) -> bool {
-        player.height != player.width
-            && ball.x < player.x + player.width
-            && ball.x + ball.width > player.x
-            && ball.y < player.y + player.height
-            && ball.y + ball.height > player.y
+        player.x <= ball.x + ball.width
+        && player.x + player.width >= ball.x 
+        && player.y <= ball.y 
+        && player.y + player.height >= ball.y
+    }
+
+    fn ball_out_of_bounds(&mut self, world: &mut World) {
+        world.render_components
+            .iter_mut()
+            .filter(|renderable| renderable.height == renderable.width)
+            .for_each(|renderable| {
+                self
+                    .goal(renderable)
+                    .then(|| self.new_ball(renderable));
+            });
     }
 
     fn goal(&self, ball: &Renderable) -> bool {
@@ -121,11 +137,10 @@ impl CollisionSystem {
     }
 
     fn bounce(&mut self, velocity: &mut Speed) {
-        velocity.dx = -1. * velocity.dx;
+        velocity.dx = (-1.) * velocity.dx;
     }
 
     fn new_ball(&mut self, ball: &mut Renderable) {
-        println!("New ball!");
         ball.x = 400.;
         ball.y = 300.;
     }
@@ -139,13 +154,13 @@ struct NetworkSystem {
 
 impl NetworkSystem {
     fn new() -> Self {
-        let socket = UdpSocket::bind("127.0.0.1:8080").expect("Failed to bind to address");
+        let socket = UdpSocket::bind("0.0.0.0:8080").expect("Failed to bind to address");
 
         socket
             .set_nonblocking(true)
             .expect("Failed to set non-blocking");
 
-        println!("Server listening on 127.0.0.1:8080");
+        println!("Server listening on 0.0.0.0:8080");
 
         NetworkSystem {
             socket,
@@ -198,8 +213,10 @@ impl NetworkSystem {
         Ok((x, y, width, height))
     }
 
-    fn send_state(&self, world: &World) {
-        println!("Sending state");
+    fn send_state(&self, world: &mut World) {
+        if world.render_components.len() < 2 {
+            return;
+        }
         world
             .render_components
             .iter()
@@ -212,6 +229,7 @@ impl NetworkSystem {
                     .map(|r| r.to_string())
                     .collect::<Vec<String>>()
                     .join(" ");
+                println!("Sending state: {}", state);
                 self.socket
                     .send_to(state.as_bytes(), renderable.source)
                     .expect("Failed to send response");
@@ -219,41 +237,35 @@ impl NetworkSystem {
     }
 }
 
-struct ControlSystem {
-    start: Instant,
-}
+struct ControlSystem;
 
 impl ControlSystem {
     fn new() -> Self {
-        ControlSystem {
-            start: Instant::now(),
-        }
+        ControlSystem 
     }
 
-    fn update(&self, x: f32, y: f32, source: SocketAddr, world: &mut World, dt: f32) {
+    fn update_players(&self, x: f32, y: f32, source: SocketAddr, world: &mut World) {
+        println!("Updating player: {} {} {}", x, y, source);
         world
             .render_components
             .iter_mut()
-            .zip(world.speed_components.iter_mut())
-            .find(|(player, speed)| player.source == source && speed.source == source)
-            .map(|(player, speed)| {
+            .find(|player| player.source == source)
+            .map(|player| {
                 player.x = x;
                 player.y = y;
-                speed.dx = (x - player.x) / dt;
-                speed.dy = (y - player.y) / dt;
             });
+    }
+
+    fn update_ball(&self, world: &mut World) {
         if world.render_components.len() >= 2 {
             world
                 .render_components
                 .iter_mut()
-                .zip(world.speed_components.iter())
-                .find(|(renderable, speed)| {
-                    renderable.height == renderable.width && renderable.source == speed.source
-                })
+                .zip(world.speed_components.iter_mut())
+                .find(|(renderable, speed)| renderable.height == renderable.width && renderable.source == speed.source)
                 .map(|(renderable, speed)| {
-                    println!("dx {}", speed.dx);
-                    renderable.x += speed.dx * dt;
-                    renderable.y += speed.dy * dt;
+                    renderable.x += speed.dx;
+                    renderable.y += speed.dy; 
                 });
         }
     }
@@ -271,75 +283,50 @@ impl ControlSystem {
         }
     }
 
-    fn get_frame_time(&self) -> f32 {
-        let diff = self.start.elapsed().as_secs_f32();
-        diff
-        //if  diff > 0.01 {
-        //    diff
-        //} else {
-        //    0.01
-        //}
-    }
-
-    fn next_frame(&mut self) {
-        self.start = Instant::now();
-    }
 }
 
 fn main() {
     let mut world = World::new();
     let mut network_system = NetworkSystem::new();
     let mut collision_system = CollisionSystem::new();
-    let mut control_system = ControlSystem::new();
+    let control_system = ControlSystem::new();
 
     loop {
-        world.render_components
-            .iter_mut()
-            .filter(|renderable| renderable.height == renderable.width)
-            .for_each(|renderable| {
-                collision_system
-                    .goal(renderable)
-                    .then(|| collision_system.new_ball(renderable));
-            });
+        collision_system.ball_out_of_bounds(&mut world);
+        collision_system.collision(&mut world);
+        control_system.update_ball(&mut world);
 
-        let dt = control_system.get_frame_time();
+        if world.render_components.len() == 2 {
+            world.create_ball();
+        }
 
         let (size, source) = match network_system.receive() {
             Ok((size, source)) => (size, source),
             Err(_) => {
-                println!("Time delta: {}", dt);
-                control_system.predict(&mut world, dt);
-                control_system.next_frame();
                 continue
             },
         };
 
         let request = &network_system.parse_request(size);
 
+
         match network_system.handle_join(request, source, &mut world) {
             Ok(()) => {
-                if world.render_components.len() == 2 {
-                    world.create_ball();
-                    network_system.send_state(&world);
-                }
-                control_system.next_frame();
                 continue
             },
             Err(_) => {
             }
         }
 
-        let (x, y, _width, _height) = match network_system.parse_player(request) {
-            Ok((x, y, width, height)) => (x, y, width, height),
-            Err(_) => {
-                control_system.next_frame();
+        let (x, y) = match network_system.parse_player(request) {
+            Ok((x, y, _width, _height)) => (x, y),
+            Err(e) => {
+                println!("Failed to parse player: {}", e);
                 continue;
             }
         };
 
-        control_system.update(x, y, source, &mut world, dt);
-        network_system.send_state(&world);
-
-        control_system.next_frame();
+        control_system.update_players(x, y, source, &mut world);
+        network_system.send_state(&mut world);
     }
 }
