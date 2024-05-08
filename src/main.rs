@@ -27,7 +27,7 @@ impl World {
                 source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1),
             };
             let velocity = Speed {
-                dx: 1.,
+                dx: 2.,
                 dy: 0.,
                 source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1),
             };
@@ -93,20 +93,16 @@ impl CollisionSystem {
         CollisionSystem
     }
 
-    //fn detect_collision(&mut self, world: &mut World) {
-    //    let (ball, mut speed) = &world
-    //        .render_components
-    //        .iter_mut()
-    //        .zip(world.speed_components.iter_mut())
-    //        .find(|(renderable, speed)| renderable.height == renderable.width)
-    //        .unwrap();
-
-    //    if world.render_components.len() >= 2 {
-    //        &world.render_components.iter_mut()
-    //            .find(|player| self.player_collision(player, ball))
-    //            .map(|_| self.bounce(speed));
-    //    }
-    //}
+    fn ball_out_of_bounds(&mut self, world: &mut World) {
+        world.render_components
+            .iter_mut()
+            .filter(|renderable| renderable.height == renderable.width)
+            .for_each(|renderable| {
+                self
+                    .goal(renderable)
+                    .then(|| self.new_ball(renderable));
+            });
+    }
 
     fn player_collision(&self, player: &Renderable, ball: &Renderable) -> bool {
         player.height != player.width
@@ -199,7 +195,6 @@ impl NetworkSystem {
     }
 
     fn send_state(&self, world: &World) {
-        println!("Sending state");
         world
             .render_components
             .iter()
@@ -251,7 +246,6 @@ impl ControlSystem {
                     renderable.height == renderable.width && renderable.source == speed.source
                 })
                 .map(|(renderable, speed)| {
-                    println!("dx {}", speed.dx);
                     renderable.x += speed.dx * dt;
                     renderable.y += speed.dy * dt;
                 });
@@ -273,12 +267,11 @@ impl ControlSystem {
 
     fn get_frame_time(&self) -> f32 {
         let diff = self.start.elapsed().as_secs_f32();
-        diff
-        //if  diff > 0.01 {
-        //    diff
-        //} else {
-        //    0.01
-        //}
+        if  diff > 0.001 {
+            diff
+        } else {
+            0.001
+        }
     }
 
     fn next_frame(&mut self) {
@@ -293,21 +286,12 @@ fn main() {
     let mut control_system = ControlSystem::new();
 
     loop {
-        world.render_components
-            .iter_mut()
-            .filter(|renderable| renderable.height == renderable.width)
-            .for_each(|renderable| {
-                collision_system
-                    .goal(renderable)
-                    .then(|| collision_system.new_ball(renderable));
-            });
-
         let dt = control_system.get_frame_time();
+        collision_system.ball_out_of_bounds(&mut world);
 
         let (size, source) = match network_system.receive() {
             Ok((size, source)) => (size, source),
             Err(_) => {
-                println!("Time delta: {}", dt);
                 control_system.predict(&mut world, dt);
                 control_system.next_frame();
                 continue
