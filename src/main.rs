@@ -1,6 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
-    num::ParseFloatError,
+    num::ParseFloatError, time::Instant,
 };
 
 struct World {
@@ -26,7 +26,7 @@ impl World {
                 source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1),
             };
             let velocity = Speed {
-                dx: 1.,
+                dx: 20.,
                 dy: 0.,
                 source: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1),
             };
@@ -213,23 +213,25 @@ impl NetworkSystem {
         Ok((x, y, width, height))
     }
 
-    fn send_state(&self, world: &mut World) {
+    fn send_state(&self, world: &mut World, source: SocketAddr) {
         if world.render_components.len() < 2 {
             return;
         }
+
+        let state = world
+            .render_components
+            .iter()
+            .filter(|r| r.source != source)
+            .map(|r| r.to_string())
+            .collect::<Vec<String>>()
+            .join(" ");
+
         world
             .render_components
             .iter()
             .filter(|renderable| renderable.height != renderable.width)
+            .filter(|renderable| renderable.source == source)
             .for_each(|renderable| {
-                let state = world
-                    .render_components
-                    .iter()
-                    .filter(|r| r.source != renderable.source)
-                    .map(|r| r.to_string())
-                    .collect::<Vec<String>>()
-                    .join(" ");
-                println!("Sending state: {}", state);
                 self.socket
                     .send_to(state.as_bytes(), renderable.source)
                     .expect("Failed to send response");
@@ -245,7 +247,6 @@ impl ControlSystem {
     }
 
     fn update_players(&self, x: f32, y: f32, source: SocketAddr, world: &mut World) {
-        println!("Updating player: {} {} {}", x, y, source);
         world
             .render_components
             .iter_mut()
@@ -256,16 +257,16 @@ impl ControlSystem {
             });
     }
 
-    fn update_ball(&self, world: &mut World) {
+    fn update_ball(&self, world: &mut World, dt: f32) {
         if world.render_components.len() >= 2 {
             world
                 .render_components
                 .iter_mut()
                 .zip(world.speed_components.iter_mut())
-                .find(|(renderable, speed)| renderable.height == renderable.width && renderable.source == speed.source)
+                .find(|(renderable, speed)| renderable.height == renderable.width && renderable.source.to_string() == speed.source.to_string())
                 .map(|(renderable, speed)| {
-                    renderable.x += speed.dx;
-                    renderable.y += speed.dy; 
+                    renderable.x += speed.dx * dt;
+                    renderable.y += speed.dy * dt; 
                 });
         }
     }
@@ -290,11 +291,13 @@ fn main() {
     let mut network_system = NetworkSystem::new();
     let mut collision_system = CollisionSystem::new();
     let control_system = ControlSystem::new();
+    let mut start = Instant::now();
+    let mut dt = 0.016;
 
     loop {
+        start = Instant::now();
         collision_system.ball_out_of_bounds(&mut world);
         collision_system.collision(&mut world);
-        control_system.update_ball(&mut world);
 
         if world.render_components.len() == 2 {
             world.create_ball();
@@ -327,6 +330,8 @@ fn main() {
         };
 
         control_system.update_players(x, y, source, &mut world);
-        network_system.send_state(&mut world);
+        network_system.send_state(&mut world, source);
+        control_system.update_ball(&mut world, dt);
+        dt = start.elapsed().as_secs_f32();
     }
 }
